@@ -1,0 +1,24 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "cyd_bsp.c"
+        "cyd_config.c"
+        "cyd_wifi.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_wifi
+        esp_event
+        nvs_flash
+        esp_netif
+        esp_http_server
+        lwip
+        esp_timer
+        esp_lcd
+        driver
+        esp_adc
+        freertos
+        esp_lcd_ili9341
+        esp_lcd_touch_xpt2046
+        lvgl
+)

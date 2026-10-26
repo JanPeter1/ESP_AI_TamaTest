@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: deskconnect-hub
+    env: python
+    plan: free
+    region: frankfurt # or oregon, frankfurt has low latency for Germany/Europe
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0

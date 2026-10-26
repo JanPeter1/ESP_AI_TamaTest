@@ -1,0 +1,32 @@
+# ESP-IDF
+build/
+firmware/build/
+managed_components/
+firmware/managed_components/
+dependencies.lock
+firmware/dependencies.lock
+sdkconfig
+sdkconfig.old
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# VS Code / IDEs
+.vscode/
+.idea/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
