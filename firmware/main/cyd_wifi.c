@@ -8,11 +8,20 @@
 #include "esp_netif.h"
 #include "esp_http_server.h"
 #include "esp_system.h"
+#include "esp_mac.h"
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
 
 static const char *TAG = "CYD_WIFI";
+
+static void copy_truncated(char *dst, size_t dst_size, const char *src) {
+    if (dst_size == 0) return;
+    size_t len = strnlen(src, dst_size - 1);
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
 
 #define MAX_STA_RETRIES       5
 #define AP_SSID_PREFIX        "DeskConnect-"
@@ -77,6 +86,7 @@ static void dns_server_task(void *pvParameters) {
     while (1) {
         int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer), 0, (struct sockaddr *)&client_addr, &client_addr_len);
         if (len < 12) continue; // Minimum DNS header size
+        if ((size_t)len + 16 > sizeof(tx_buffer)) continue; // Reserve space for the portal A record
 
         // Prepare response
         memcpy(tx_buffer, rx_buffer, len);
@@ -126,8 +136,12 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     cyd_config_t cfg;
     cyd_config_load(&cfg);
 
-    char html_buf[2500];
-    snprintf(html_buf, sizeof(html_buf),
+    char *html_buf = malloc(2500);
+    if (html_buf == NULL) {
+        httpd_resp_send_500(req);
+        return ESP_ERR_NO_MEM;
+    }
+    snprintf(html_buf, 2500,
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>DeskConnect Setup</title>"
@@ -166,6 +180,9 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html_buf, HTTPD_RESP_USE_STRLEN);
+    free(html_buf);
+    ESP_LOGI(TAG, "Portal page served; HTTP task stack remaining: %u bytes.",
+             (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
     return ESP_OK;
 }
 
@@ -192,12 +209,12 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
             char decoded[128];
             url_decode(decoded, val, sizeof(decoded));
 
-            if (strcmp(key, "ssid") == 0) strncpy(new_cfg.wifi_ssid, decoded, sizeof(new_cfg.wifi_ssid) - 1);
-            else if (strcmp(key, "pass") == 0) strncpy(new_cfg.wifi_pass, decoded, sizeof(new_cfg.wifi_pass) - 1);
-            else if (strcmp(key, "dev_id") == 0) strncpy(new_cfg.device_id, decoded, sizeof(new_cfg.device_id) - 1);
-            else if (strcmp(key, "srv_host") == 0) strncpy(new_cfg.server_host, decoded, sizeof(new_cfg.server_host) - 1);
+            if (strcmp(key, "ssid") == 0) copy_truncated(new_cfg.wifi_ssid, sizeof(new_cfg.wifi_ssid), decoded);
+            else if (strcmp(key, "pass") == 0) copy_truncated(new_cfg.wifi_pass, sizeof(new_cfg.wifi_pass), decoded);
+            else if (strcmp(key, "dev_id") == 0) copy_truncated(new_cfg.device_id, sizeof(new_cfg.device_id), decoded);
+            else if (strcmp(key, "srv_host") == 0) copy_truncated(new_cfg.server_host, sizeof(new_cfg.server_host), decoded);
             else if (strcmp(key, "srv_port") == 0) new_cfg.server_port = atoi(decoded);
-            else if (strcmp(key, "room") == 0) strncpy(new_cfg.room_code, decoded, sizeof(new_cfg.room_code) - 1);
+            else if (strcmp(key, "room") == 0) copy_truncated(new_cfg.room_code, sizeof(new_cfg.room_code), decoded);
         }
         token = strtok(NULL, "&");
     }
@@ -228,6 +245,7 @@ static void start_webserver(void) {
     if (webserver_handle != NULL) return;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
 
@@ -268,6 +286,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ESP_LOGI(TAG, "Wi-Fi STA started, connecting...");
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (current_state == CYD_WIFI_STATE_AP_PORTAL) {
+            ESP_LOGI(TAG, "Ignoring STA disconnect while setup AP is active.");
+            return;
+        }
         if (sta_retry_num < MAX_STA_RETRIES) {
             sta_retry_num++;
             ESP_LOGW(TAG, "Retry connecting to Wi-Fi (%d/%d)...", sta_retry_num, MAX_STA_RETRIES);
@@ -276,6 +298,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             ESP_LOGE(TAG, "Failed to connect to Wi-Fi. Starting AP portal fallback...");
             cyd_wifi_start_ap_portal();
         }
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
+        ESP_LOGI(TAG, "Setup AP client connected (AID=%d).", event->aid);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
+        ESP_LOGW(TAG, "Setup AP client disconnected (AID=%d).", event->aid);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         sta_retry_num = 0;
@@ -322,8 +350,8 @@ esp_err_t cyd_wifi_connect_sta(void) {
     set_state(CYD_WIFI_STATE_CONNECTING, cfg.wifi_ssid);
 
     wifi_config_t wifi_cfg = {0};
-    strncpy((char *)wifi_cfg.sta.ssid, cfg.wifi_ssid, sizeof(wifi_cfg.sta.ssid));
-    strncpy((char *)wifi_cfg.sta.password, cfg.wifi_pass, sizeof(wifi_cfg.sta.password));
+    memcpy(wifi_cfg.sta.ssid, cfg.wifi_ssid, strnlen(cfg.wifi_ssid, sizeof(wifi_cfg.sta.ssid)));
+    memcpy(wifi_cfg.sta.password, cfg.wifi_pass, strnlen(cfg.wifi_pass, sizeof(wifi_cfg.sta.password)));
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -333,6 +361,11 @@ esp_err_t cyd_wifi_connect_sta(void) {
 }
 
 esp_err_t cyd_wifi_start_ap_portal(void) {
+    if (current_state == CYD_WIFI_STATE_AP_PORTAL) {
+        ESP_LOGI(TAG, "Setup AP is already active; keeping existing clients connected.");
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "Starting SoftAP: %s...", ap_ssid_str);
     set_state(CYD_WIFI_STATE_AP_PORTAL, ap_ssid_str);
 
@@ -340,12 +373,16 @@ esp_err_t cyd_wifi_start_ap_portal(void) {
         .ap = {
             .channel = AP_CHANNEL,
             .max_connection = AP_MAX_CONN,
+            .ssid_len = strlen(ap_ssid_str),
             .authmode = WIFI_AUTH_OPEN,
         },
     };
     strncpy((char *)wifi_ap_cfg.ap.ssid, ap_ssid_str, sizeof(wifi_ap_cfg.ap.ssid));
 
-    ESP_ERROR_CHECK(esp_wifi_stop());
+    esp_err_t stop_err = esp_wifi_stop();
+    if (stop_err != ESP_OK && stop_err != ESP_ERR_WIFI_NOT_STARTED) {
+        ESP_ERROR_CHECK(stop_err);
+    }
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());

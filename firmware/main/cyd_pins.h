@@ -19,7 +19,7 @@
 // Display Resolution
 #define CYD_LCD_H_RES           320
 #define CYD_LCD_V_RES           240
-#define CYD_LCD_PIXEL_CLOCK_HZ  (40 * 1000 * 1000) // 40 MHz SPI
+#define CYD_LCD_PIXEL_CLOCK_HZ  (20 * 1000 * 1000) // Conservative SPI clock for stable RGB565 transfers
 
 // Touchscreen SPI (XPT2046 on SPI3 / VSPI via GPIO Matrix)
 #define CYD_TOUCH_HOST          SPI3_HOST

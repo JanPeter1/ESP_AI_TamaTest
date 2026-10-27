@@ -26,6 +26,49 @@ static const char *TAG = "CYD_BSP";
 
 static adc_oneshot_unit_handle_t adc1_handle = NULL;
 
+// Match the alternate ILI9341_2 initialization used by AIStudio's CYD setup.
+// Several CYD panel batches need this power/gamma sequence instead of the
+// generic esp_lcd_ili9341 defaults.
+static const uint8_t cyd_ili9341_madctl[] = {0x08};
+static const uint8_t cyd_ili9341_colmod[] = {0x55};
+static const uint8_t cyd_ili9341_2b[] = {0x00, 0x00, 0x01, 0x3F};
+static const uint8_t cyd_ili9341_2a[] = {0x00, 0x00, 0x00, 0xEF};
+static const uint8_t cyd_ili9341_gamma_pos[] = {
+    0x0F, 0x2A, 0x28, 0x08, 0x0E, 0x08, 0x54, 0xA9,
+    0x43, 0x0A, 0x0F, 0x00, 0x00, 0x00, 0x00
+};
+static const uint8_t cyd_ili9341_gamma_neg[] = {
+    0x00, 0x15, 0x17, 0x07, 0x11, 0x06, 0x2B, 0x56,
+    0x3C, 0x05, 0x10, 0x0F, 0x3F, 0x3F, 0x0F
+};
+static const ili9341_lcd_init_cmd_t cyd_ili9341_init_cmds[] = {
+    {0xCF, (uint8_t[]){0x00, 0xC1, 0x30}, 3, 0},
+    {0xED, (uint8_t[]){0x64, 0x03, 0x12, 0x81}, 4, 0},
+    {0xE8, (uint8_t[]){0x85, 0x00, 0x78}, 3, 0},
+    {0xCB, (uint8_t[]){0x39, 0x2C, 0x00, 0x34, 0x02}, 5, 0},
+    {0xF7, (uint8_t[]){0x20}, 1, 0},
+    {0xEA, (uint8_t[]){0x00, 0x00}, 2, 0},
+    {0xC0, (uint8_t[]){0x10}, 1, 0},
+    {0xC1, (uint8_t[]){0x00}, 1, 0},
+    {0xC5, (uint8_t[]){0x30, 0x30}, 2, 0},
+    {0xC7, (uint8_t[]){0xB7}, 1, 0},
+    {0x3A, cyd_ili9341_colmod, sizeof(cyd_ili9341_colmod), 0},
+    {0x36, cyd_ili9341_madctl, sizeof(cyd_ili9341_madctl), 0},
+    {0xB1, (uint8_t[]){0x00, 0x1A}, 2, 0},
+    {0xB6, (uint8_t[]){0x08, 0x82, 0x27}, 3, 0},
+    {0xF2, (uint8_t[]){0x00}, 1, 0},
+    {0x26, (uint8_t[]){0x01}, 1, 0},
+    {0xE0, cyd_ili9341_gamma_pos, sizeof(cyd_ili9341_gamma_pos), 0},
+    {0xE1, cyd_ili9341_gamma_neg, sizeof(cyd_ili9341_gamma_neg), 0},
+    {0x2B, cyd_ili9341_2b, sizeof(cyd_ili9341_2b), 0},
+    {0x2A, cyd_ili9341_2a, sizeof(cyd_ili9341_2a), 0},
+    {0x11, NULL, 0, 120},
+};
+static const ili9341_vendor_config_t cyd_ili9341_vendor_config = {
+    .init_cmds = cyd_ili9341_init_cmds,
+    .init_cmds_size = sizeof(cyd_ili9341_init_cmds) / sizeof(cyd_ili9341_init_cmds[0]),
+};
+
 esp_err_t cyd_bsp_init(void) {
     ESP_LOGI(TAG, "Initializing CYD BSP hardware (ESP32-2432S028)...");
     ESP_ERROR_CHECK(cyd_bsp_rgb_init());
@@ -197,16 +240,25 @@ esp_err_t cyd_bsp_display_init(esp_lcd_panel_handle_t *ret_panel, esp_lcd_panel_
 
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = CYD_LCD_RST,
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+        .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
+#else
         .rgb_endian = LCD_RGB_ENDIAN_BGR,
+#endif
         .bits_per_pixel = 16,
+        .vendor_config = (void *)&cyd_ili9341_vendor_config,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(*ret_io, &panel_config, ret_panel));
 
     ESP_ERROR_CHECK(esp_lcd_panel_reset(*ret_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(*ret_panel));
+    // This CYD panel batch needs display inversion enabled for normal RGB colors.
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(*ret_panel, true));
     // Landscape orientation: 320 x 240
     ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(*ret_panel, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(*ret_panel, false, true));
+    // Match AIStudio's landscape rotation without mirroring the rendered UI.
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(*ret_panel, false, false));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*ret_panel, true));
 
     ESP_LOGI(TAG, "LCD initialized successfully.");
@@ -230,6 +282,7 @@ esp_err_t cyd_bsp_touch_init(esp_lcd_touch_handle_t *ret_touch) {
 
     esp_lcd_panel_io_spi_config_t tp_io_config = {
         .cs_gpio_num = CYD_TOUCH_CS,
+        .dc_gpio_num = GPIO_NUM_NC,
         .pclk_hz = 2 * 1000 * 1000, // 2 MHz
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
@@ -240,12 +293,13 @@ esp_err_t cyd_bsp_touch_init(esp_lcd_touch_handle_t *ret_touch) {
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)CYD_TOUCH_HOST, &tp_io_config, &tp_io_handle));
 
     esp_lcd_touch_config_t tp_cfg = {
-        .x_max = CYD_LCD_H_RES,
-        .y_max = CYD_LCD_V_RES,
+        // XPT2046 reports native portrait axes; landscape display rotates them.
+        .x_max = CYD_LCD_V_RES,
+        .y_max = CYD_LCD_H_RES,
         .rst_gpio_num = -1,
         .int_gpio_num = CYD_TOUCH_IRQ,
         .flags = {
-            .swap_xy = 0,
+            .swap_xy = 1,
             .mirror_x = 0,
             .mirror_y = 0,
         },

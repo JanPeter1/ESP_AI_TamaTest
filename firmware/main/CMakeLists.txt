@@ -15,10 +15,12 @@ idf_component_register(
         lwip
         esp_timer
         esp_lcd
+        esp_driver_ledc
         driver
         esp_adc
         freertos
         esp_lcd_ili9341
         esp_lcd_touch_xpt2046
+        esp_lcd_touch
         lvgl
 )
