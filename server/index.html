@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeskConnect</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #080a0f;
+      color: #e5e7eb;
+      font: 16px system-ui, sans-serif;
+    }
+    main { max-width: 520px; margin: auto; }
+    h1 { color: #d7ad54; text-align: center; }
+    section {
+      margin: 14px 0;
+      padding: 16px;
+      background: #111722;
+      border: 1px solid #283244;
+      border-radius: 14px;
+    }
+    label {
+      display: block;
+      margin: 8px 0 4px;
+      color: #9ca3af;
+      font-size: 0.85rem;
+    }
+    input, button {
+      width: 100%;
+      padding: 11px;
+      border: 1px solid #374151;
+      border-radius: 9px;
+      background: #171f2d;
+      color: #f3f4f6;
+      font: inherit;
+    }
+    button { cursor: pointer; }
+    button:hover { border-color: #d7ad54; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .grid button { min-height: 54px; text-align: left; }
+    .grid button span {
+      display: block;
+      color: #aeb8c7;
+      font-size: 0.75rem;
+    }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; min-width: 0; }
+    .muted { color: #8994a5; font-size: 0.85rem; }
+    .message { padding: 9px 0; border-top: 1px solid #2b3545; }
+    .status { min-height: 1.3em; color: #7dd3a7; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>DeskConnect</h1>
+    <section>
+      <h2>Raum</h2>
+      <div class="row">
+        <div>
+          <label for="room">Raum-Code</label>
+          <input id="room" value="DeskRoom-1" maxlength="31">
+        </div>
+        <div>
+          <label for="name">Dein Name</label>
+          <input id="name" value="Browser" maxlength="31">
+        </div>
+      </div>
+      <p class="muted" id="participants">Teilnehmerstatus wird geladen …</p>
+      <p class="muted" id="connection">Live-Verbindung wird aufgebaut …</p>
+    </section>
+
+    <section>
+      <h2>Nachricht senden</h2>
+      <label>Thema / Button-Set</label>
+      <div class="grid" id="presets">
+        <button data-category="stimmung" data-preset="alles_gut" data-emotion="happy">Alles gut<span>Mir geht es gut!</span></button>
+        <button data-category="stimmung" data-preset="schlafen" data-emotion="sleepy">Schlafen<span>Gute Nacht!</span></button>
+        <button data-category="alltag" data-preset="hunger" data-emotion="hungry">Hunger!<span>Gibt es Essen?</span></button>
+        <button data-category="alltag" data-preset="kaffee" data-emotion="curious">Kaffee?<span>Lust auf eine Pause?</span></button>
+        <button data-category="naehe" data-preset="hab_dich_lieb" data-emotion="love">Hab dich lieb<span>Ich mag dich sehr!</span></button>
+        <button data-category="naehe" data-preset="feierabend" data-emotion="happy">Feierabend!<span>Geschafft für heute!</span></button>
+        <button data-category="pause" data-preset="beschaeftigt" data-emotion="busy">Bitte Ruhe<span>Bin im Call.</span></button>
+        <button data-category="pause" data-preset="gleich_da" data-emotion="wave">Gleich da<span>Bin bald da!</span></button>
+      </div>
+      <label for="custom">Eigene Nachricht</label>
+      <input id="custom" maxlength="120" placeholder="Kurze Nachricht …">
+      <button id="sendCustom">Nachricht senden</button>
+      <p class="status" id="status"></p>
+    </section>
+
+    <section>
+      <h2>Letzte Nachrichten</h2>
+      <div id="feed" class="muted">Noch keine Nachrichten.</div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const feed = $("feed");
+    const seen = new Set();
+    let roomSocket = null;
+    let connectionGeneration = 0;
+
+    function currentRoom() {
+      return $("room").value.trim() || "DeskRoom-1";
+    }
+
+    function currentName() {
+      return $("name").value.trim().slice(0, 22) || "Browser";
+    }
+
+    function showMessage(message) {
+      if (!message || message.type !== "message" || seen.has(message.id)) return;
+      seen.add(message.id);
+      const row = document.createElement("div");
+      row.className = "message";
+      row.textContent = `${message.sender_name}: ${message.text}`;
+      feed.prepend(row);
+      while (feed.children.length > 8) feed.lastChild.remove();
+    }
+
+    async function refreshParticipants() {
+      try {
+        const response = await fetch(`/api/rooms/${encodeURIComponent(currentRoom())}/participants`);
+        if (!response.ok) throw new Error("Teilnehmerstatus nicht verfügbar.");
+        const data = await response.json();
+        $("participants").textContent = data.participants.length
+          ? `Im Raum: ${data.participants.map((person) => person.sender_name).join(", ")}`
+          : "Noch keine Geräte online.";
+      } catch {
+        $("participants").textContent = "Teilnehmerstatus nicht verfügbar.";
+      }
+    }
+
+    function connectRoom() {
+      const generation = ++connectionGeneration;
+      if (roomSocket) roomSocket.close();
+
+      const room = currentRoom();
+      const clientId = `browser-${currentName()}`;
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(
+        `${protocol}//${location.host}/ws/${encodeURIComponent(room)}/${encodeURIComponent(clientId)}`
+      );
+      roomSocket = socket;
+      $("connection").textContent = "Live-Verbindung wird aufgebaut …";
+
+      socket.addEventListener("open", () => {
+        if (generation !== connectionGeneration) return;
+        socket.send(JSON.stringify({
+          type: "hello",
+          sender_name: currentName(),
+          avatar_id: 0
+        }));
+        $("connection").textContent = "Live mit dem Raum verbunden.";
+      });
+
+      socket.addEventListener("message", (event) => {
+        if (generation !== connectionGeneration) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "history") {
+            seen.clear();
+            feed.replaceChildren();
+            if (!data.messages.length) feed.textContent = "Noch keine Nachrichten.";
+            data.messages.forEach(showMessage);
+          } else {
+            showMessage(data);
+          }
+        } catch {
+          $("connection").textContent = "Ungültige Serverantwort.";
+        }
+      });
+
+      socket.addEventListener("close", () => {
+        if (generation !== connectionGeneration) return;
+        $("connection").textContent = "Live-Verbindung getrennt; neuer Versuch folgt.";
+        window.setTimeout(() => {
+          if (generation === connectionGeneration) connectRoom();
+        }, 3000);
+      });
+    }
+
+    async function send(data) {
+      data.room = currentRoom();
+      data.sender_id = `browser-${currentName()}`;
+      data.sender_name = currentName();
+      try {
+        const response = await fetch("/api/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data)
+        });
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.detail || "Senden fehlgeschlagen.");
+        }
+        $("status").textContent = "Nachricht gesendet.";
+      } catch (error) {
+        $("status").textContent = error.message;
+      }
+    }
+
+    document.querySelectorAll("#presets button").forEach((button) => {
+      button.addEventListener("click", () => send({
+        preset_id: button.dataset.preset,
+        category: button.dataset.category,
+        emotion: button.dataset.emotion,
+        text: button.childNodes[0].textContent.trim()
+      }));
+    });
+
+    $("sendCustom").addEventListener("click", () => {
+      const text = $("custom").value.trim();
+      if (!text) return;
+      send({ preset_id: "custom", category: "alltag", emotion: "neutral", text });
+      $("custom").value = "";
+    });
+
+    $("room").addEventListener("change", () => {
+      seen.clear();
+      feed.textContent = "Noch keine Nachrichten.";
+      connectRoom();
+      refreshParticipants();
+    });
+    $("name").addEventListener("change", connectRoom);
+
+    connectRoom();
+    refreshParticipants();
+    window.setInterval(refreshParticipants, 5000);
+  </script>
+</body>
+</html>

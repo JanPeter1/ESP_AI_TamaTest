@@ -2,10 +2,10 @@
 
 ## Project Structure & Module Organization
 
-- `firmware/` is the ESP-IDF 6.1 application. App and board code are in `firmware/main/`; the ILI9341 driver is in `firmware/components/esp_lcd_ili9341/`.
-- `firmware/HARDWARE_DISPLAY_TOUCH.md` records the known-working CYD display and touch setup.
-- `server/` is a separate FastAPI prototype with `app.py`, `requirements.txt`, and deployment files. Its WebSocket routes are not yet connected to the ESP32 firmware.
-- `README.md` is the quick start; `PROJEKT_ZUSAMMENFASSUNG.md` describes implemented features and planned work.
+- `firmware/` is the ESP-IDF 6.1 application. App, room messaging and LVGL assets are in `firmware/main/`; the ILI9341 driver is in `firmware/components/esp_lcd_ili9341/`.
+- `firmware/main/assets/README.md` records avatar provenance and CC0 terms. `firmware/HARDWARE_DISPLAY_TOUCH.md` records the working CYD setup.
+- `server/` contains the FastAPI room relay and `index.html` browser client. Keep its WebSocket and HTTP contract in sync with `server/INTERFACE.md` and the firmware client.
+- `README.md` is the quick start; `PROJEKT_ZUSAMMENFASSUNG.md` records implemented features and roadmap.
 
 ## Build and Development Commands
 

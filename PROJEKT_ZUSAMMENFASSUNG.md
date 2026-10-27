@@ -1,34 +1,26 @@
 # DeskConnect CYD – Projektübersicht
 
-## Zweck und aktueller Stand
+## Zweck und Funktionsumfang
 
-DeskConnect CYD ist ein ESP-IDF-Projekt für ein ESP32-2432S028 mit ILI9341-Farbdisplay und XPT2046-Touch. Die Firmware startet eine LVGL-Oberfläche im Querformat, zeigt acht vorgefertigte Status-Buttons und gibt bei lokalem Tastendruck Rückmeldung über Bildschirm, RGB-LED und Summer. Die Anzeige verwendet eine dunkle Gestaltung und mehrzeilige Button-Titel, damit längere Beschriftungen in die Kacheln passen.
+DeskConnect CYD ist ein ESP-IDF-Projekt für zwei ESP32-2432S028-Displays mit ILI9341-TFT und XPT2046-Touch. Ein dunkler Querformat-Startbildschirm zeigt die letzte Raumnachricht mit Pixel-Avatar und einfacher Emotionsdarstellung. Wischen öffnet die Sendeseite mit vier Themenkategorien und acht vorbereiteten Nachrichten. Buttons geben zusätzlich LED- und Audiofeedback.
 
-Ein zweiter CYD kann derzeit nicht automatisch Nachrichten von diesem Gerät empfangen. Die Button-Ereignisse werden lokal verarbeitet. Der Server unter `server/` ist ein eigenständiger FastAPI-Prototyp: Er bietet eine Browserseite, `/api/notify`, `/api/upload` und WebSockets unter `/ws/{room}/{client_id}`. Verbindungen und Räume liegen nur im Arbeitsspeicher des Serverprozesses. Ein WebSocket-Client und Nachrichtenprotokoll sind in der aktuellen ESP-IDF-Firmware noch nicht integriert. Foto-Sharing, Spiele und Home-Assistant-Anbindung sind somit keine fertigen Gerätefunktionen.
+Die Geräte verbinden sich nach dem WLAN-Setup per WebSocket mit demselben Raumserver. Der Server stellt eine Browseroberfläche, HTTP-Nachrichtenendpunkte und `/ws/{room}/{client_id}` bereit. Das gemeinsame JSON-Protokoll ist in [server/INTERFACE.md](server/INTERFACE.md) beschrieben. Die Firmware-Avatare sind Katze und Hund aus einem CC0-Asset; Quelle und Generator stehen unter `firmware/main/assets/`.
 
-## WLAN und Einrichtung
+## Einrichtung und Netzwerk
 
-Die Firmware speichert Zugangsdaten und Geräteparameter im NVS. Wenn eine Verbindung zum konfigurierten WLAN nicht verfügbar ist, stellt das Gerät einen `DeskConnect-XXXX`-Access-Point mit Setup-Webseite bereit. Das Gerät kann WLAN-SSID und Kennwort, Gerätename, Serveradresse/-port und Raumkennung speichern. Diese Angaben konfigurieren den Setup-Datensatz, sie aktivieren aber noch keine Serververbindung in der Firmware.
+WLAN-Zugangsdaten und Serverparameter werden im NVS gespeichert. Der Setup-Button öffnet einen `DeskConnect-XXXX`-Access-Point mit Portal unter `http://192.168.4.1`; beim Drücken wird der Button rot, und bei aktivem Setup-AP bleibt er rot. Auf allen Displays müssen Server-Host, Port und Raumcode übereinstimmen.
 
-## Board und Treiber
+Für einen lokalen Server muss die im Display eingetragene Server-IP die LAN-IP des PCs sein, üblicherweise Port 8000. Der Server bindet an alle Netzwerkschnittstellen. Gast-WLAN, Client-Isolation oder die Windows-Firewall können Verbindungen zwischen Display und PC verhindern. Der Server behält maximal acht Nachrichten pro Raum während der Prozesslaufzeit im RAM. Er hat derzeit keine Anmeldung, persistente Ablage oder geteilte Datenbank; nur einen Serverprozess verwenden.
 
-- Display: ILI9341, 320 × 240 im Querformat, SPI2, RGB565, 20 MHz.
-- Touch: XPT2046 an SPI3.
-- Die bekannte funktionierende Pinbelegung, Achsentransformation und Vendor-Initialisierung stehen in [`firmware/HARDWARE_DISPLAY_TOUCH.md`](firmware/HARDWARE_DISPLAY_TOUCH.md).
-- Die RGB-LED ist active-low. Die Presets kodieren LED-Farben als RGB-Bitmaske.
+## Hardware und Build
 
-## Bauen und ausführen
+- Display: ILI9341, 320 × 240, Querformat, SPI2, RGB565, 20 MHz.
+- Touch: XPT2046 über SPI3.
+- Pinbelegung und funktionierende Controller-Initialisierung: [firmware/HARDWARE_DISPLAY_TOUCH.md](firmware/HARDWARE_DISPLAY_TOUCH.md).
+- Die RGB-LED ist active-low; Presets teilen sich dieselbe RGB-Bitmaske.
+- Firmware bauen: mit ESP-IDF 6.1 aus `firmware/` `idf.py build` ausführen.
+- Server starten: aus `server/` `python -m pip install -r requirements.txt`, danach `python app.py`. Die Oberfläche läuft auf Port 8000 beziehungsweise dem Wert von `PORT`.
 
-Mit ESP-IDF 6.1 in PowerShell aus `firmware/`:
+## Nächste Schritte
 
-```powershell
-idf.py set-target esp32
-idf.py build
-idf.py -p COM4 flash monitor
-```
-
-Den seriellen Port entsprechend dem angeschlossenen Board anpassen. Für den Python-Prototyp in `server/` `python -m pip install -r requirements.txt` und anschließend `python app.py` ausführen; standardmäßig lauscht er auf Port 8000.
-
-## Geplante Erweiterungen
-
-Die nächsten Integrationsschritte sind ein abgesichertes Nachrichtenprotokoll zwischen Firmware und Server, zuverlässige Zustellung zwischen Geräten und anschließend die Umsetzung zusätzlicher Funktionen wie Fotoanzeige, Spiele oder Home-Assistant-Ereignisse. Bis dahin die Serverfunktionen als Prototyp und nicht als bereits verfügbare Display-Funktionen behandeln.
+Mögliche Erweiterungen sind Authentifizierung, persistente Nachrichten, Wiederzustellung nach Offlinezeiten und konfigurierbare Avatar-Sets. Nachrichten übertragen aktuell Text und eine Avatar-ID, keine Bilddateien. Fotoübertragung, Spiele und Home-Assistant-Anbindung gehören nicht zum implementierten Gerätefluss.

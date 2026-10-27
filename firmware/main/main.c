@@ -9,6 +9,8 @@
 #include "cyd_config.h"
 #include "cyd_wifi.h"
 #include "cyd_presets.h"
+#include "cyd_messages.h"
+#include "cyd_avatars.h"
 #include "lvgl.h"
 
 static const char *TAG = "MAIN";
@@ -24,9 +26,43 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 static SemaphoreHandle_t lcd_flush_sem = NULL;
 
 static lv_obj_t *lbl_wifi_status = NULL;
+static lv_obj_t *lbl_send_wifi_status = NULL;
+static lv_obj_t *lbl_server_status = NULL;
 static lv_obj_t *lbl_toast = NULL;
 static lv_obj_t *modal_settings = NULL;
 static lv_obj_t *modal_incoming = NULL;
+static lv_obj_t *home_screen = NULL;
+static lv_obj_t *send_screen = NULL;
+static lv_obj_t *send_grid = NULL;
+static lv_obj_t *home_avatar = NULL;
+static lv_obj_t *home_sender = NULL;
+static lv_obj_t *home_message = NULL;
+static lv_obj_t *home_emotion = NULL;
+static lv_obj_t *home_previous = NULL;
+static lv_obj_t *setup_buttons[2] = {0};
+static lv_obj_t *setup_labels[2] = {0};
+static bool setup_ap_active = false;
+static lv_obj_t *category_buttons[4] = {0};
+static bool enabled_categories[4] = {true, true, true, true};
+static cyd_room_message_t room_feed[8];
+static size_t room_feed_count = 0;
+static char local_device_id[32] = "CYD_Display";
+
+static void add_room_message_locked(const cyd_room_message_t *message);
+static void refresh_home_messages(void);
+static void switch_to_send_screen(lv_event_t *event);
+static void switch_to_home_screen(lv_event_t *event);
+static void set_dark_button_style(lv_obj_t *button, uint32_t bg_hex, uint32_t border_hex);
+
+static void style_setup_buttons(void) {
+    const uint32_t bg = setup_ap_active ? 0x7F1D1D : 0x10151E;
+    const uint32_t border = setup_ap_active ? 0xEF4444 : 0x334155;
+    const uint32_t text = setup_ap_active ? 0xFFFFFF : 0xC4CAD4;
+    for (size_t i = 0; i < 2; i++) {
+        if (setup_buttons[i]) set_dark_button_style(setup_buttons[i], bg, border);
+        if (setup_labels[i]) lv_obj_set_style_text_color(setup_labels[i], lv_color_hex(text), 0);
+    }
+}
 
 static lv_color_t muted_accent(uint32_t color_hex) {
     return lv_color_darken(lv_color_hex(color_hex), 72);
@@ -301,12 +337,31 @@ static void show_ap_portal_modal(const char *ap_ssid) {
     lv_obj_center(lbl_close);
 }
 
+static void start_ap_portal_task(void *arg) {
+    (void)arg;
+    esp_err_t err = cyd_wifi_start_ap_portal();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not start setup AP: %s", esp_err_to_name(err));
+    }
+    vTaskDelete(NULL);
+}
+
 static void btn_settings_event_cb(lv_event_t *e) {
-    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-        ESP_LOGI(TAG, "Settings button tapped: starting SoftAP portal...");
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *button = lv_event_get_target(e);
+    if (code == LV_EVENT_PRESSED) {
+        set_dark_button_style(button, 0x7F1D1D, 0xEF4444);
+        lv_obj_t *label = lv_obj_get_child(button, 0);
+        if (label) lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+    } else if (code == LV_EVENT_RELEASED) {
+        style_setup_buttons();
+    } else if (code == LV_EVENT_CLICKED) {
+        ESP_LOGI(TAG, "Settings button clicked; queueing SoftAP start...");
         cyd_bsp_rgb_set(false, false, true);
         cyd_bsp_play_tone(880, 80);
-        cyd_wifi_start_ap_portal();
+        if (xTaskCreate(start_ap_portal_task, "setup_ap", 4096, NULL, 5, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "Could not create setup AP task");
+        }
     }
 }
 
@@ -320,6 +375,8 @@ static void btn_preset_event_cb(lv_event_t *e) {
             const cyd_preset_t *preset = &CYD_PRESETS[idx];
             ESP_LOGI(TAG, "Sending Preset [%s]: %s", preset->id, preset->message);
 
+            bool sent = cyd_messages_send_preset(preset);
+
             // Audio & LED Feedback
             cyd_bsp_play_tone(1175, 70); // High D6 chime click
             cyd_bsp_rgb_set((preset->led_code & 0x01) != 0,
@@ -327,8 +384,19 @@ static void btn_preset_event_cb(lv_event_t *e) {
                             (preset->led_code & 0x04) != 0);
 
             char toast_buf[64];
-            snprintf(toast_buf, sizeof(toast_buf), "Gesendet: %s", preset->title);
+            snprintf(toast_buf, sizeof(toast_buf), "%s: %s", sent ? "Gesendet" : "Nur lokal", preset->title);
             show_toast(toast_buf);
+
+            if (!sent) {
+                cyd_room_message_t local_message = {0};
+                snprintf(local_message.sender_id, sizeof(local_message.sender_id), "%s", local_device_id);
+                snprintf(local_message.sender_name, sizeof(local_message.sender_name), "%s", local_device_id);
+                snprintf(local_message.text, sizeof(local_message.text), "%s", preset->message);
+                local_message.avatar_id = (uint8_t)(local_device_id[0] & 1);
+                add_room_message_locked(&local_message);
+            }
+
+            lv_screen_load_anim(home_screen, LV_SCREEN_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
 
             // In background task: turn LED off after 400ms
             vTaskDelay(pdMS_TO_TICKS(400));
@@ -342,6 +410,7 @@ static void btn_preset_event_cb(lv_event_t *e) {
 // ==========================================
 static void on_wifi_state_changed(cyd_wifi_state_t state, const char *info_str) {
     if (!cyd_lvgl_lock(100)) return;
+    setup_ap_active = state == CYD_WIFI_STATE_AP_PORTAL;
 
     if (lbl_wifi_status) {
         char buf[64];
@@ -374,87 +443,324 @@ static void on_wifi_state_changed(cyd_wifi_state_t state, const char *info_str) 
                 lv_obj_set_style_text_color(lbl_wifi_status, lv_color_hex(0x9A4249), 0);
                 break;
         }
+        if (lbl_send_wifi_status) lv_label_set_text(lbl_send_wifi_status, buf);
     }
+    style_setup_buttons();
 
     cyd_lvgl_unlock();
+    if (state == CYD_WIFI_STATE_CONNECTED) {
+        esp_err_t err = cyd_messages_start();
+        if (err != ESP_OK) ESP_LOGE(TAG, "Could not start room messaging: %s", esp_err_to_name(err));
+    }
 }
 
 // ==========================================
-// Build UI (DeskConnect Touch Screen)
+// Two-page room UI
 // ==========================================
-static void create_demo_ui(void) {
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x080A0F), 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+static void set_screen_background(lv_obj_t *screen) {
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x080A0F), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+}
 
-    // --- Header Bar (Height ~30px) ---
-    lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "DeskConnect");
-    lv_obj_set_style_text_color(title, lv_color_hex(0xA8873C), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 7);
+static void add_header(lv_obj_t *screen, bool home) {
+    lv_obj_t *title = lv_label_create(screen);
+    lv_label_set_text(title, home ? "DeskConnect" : "Nachricht senden");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD7AD54), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 7, 6);
 
-    lbl_wifi_status = lv_label_create(scr);
-    lv_label_set_text(lbl_wifi_status, "WLAN...");
-    lv_obj_set_style_text_color(lbl_wifi_status, lv_color_hex(0x596579), 0);
-    lv_obj_align(lbl_wifi_status, LV_ALIGN_TOP_LEFT, 110, 8);
+    lv_obj_t *status = lv_label_create(screen);
+    lv_label_set_text(status, "WLAN...");
+    lv_obj_set_style_text_color(status, lv_color_hex(0x596579), 0);
+    lv_obj_set_width(status, 104);
+    lv_label_set_long_mode(status, LV_LABEL_LONG_DOT);
+    lv_obj_align(status, LV_ALIGN_TOP_LEFT, home ? 108 : 143, 7);
+    if (home) lbl_wifi_status = status;
+    else lbl_send_wifi_status = status;
 
-    lv_obj_t *btn_settings = lv_button_create(scr);
-    lv_obj_set_size(btn_settings, 70, 24);
-    lv_obj_align(btn_settings, LV_ALIGN_TOP_RIGHT, -6, 4);
-    lv_obj_add_event_cb(btn_settings, btn_settings_event_cb, LV_EVENT_CLICKED, NULL);
-    set_dark_button_style(btn_settings, 0x10151E, 0x334155);
-    lv_obj_t *lbl_settings = lv_label_create(btn_settings);
-    lv_label_set_text(lbl_settings, "Setup");
-    lv_obj_set_style_text_color(lbl_settings, lv_color_hex(0xC4CAD4), 0);
-    lv_obj_center(lbl_settings);
+    lv_obj_t *setup = lv_button_create(screen);
+    lv_obj_set_size(setup, 70, 30);
+    lv_obj_align(setup, LV_ALIGN_TOP_RIGHT, -5, 3);
+    lv_obj_add_event_cb(setup, btn_settings_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(setup, btn_settings_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(setup, btn_settings_event_cb, LV_EVENT_CLICKED, NULL);
+    const size_t setup_idx = home ? 0 : 1;
+    setup_buttons[setup_idx] = setup;
+    lv_obj_t *setup_label = lv_label_create(setup);
+    lv_label_set_text(setup_label, "Setup");
+    setup_labels[setup_idx] = setup_label;
+    style_setup_buttons();
+    lv_obj_center(setup_label);
+}
 
-    // --- 8 Preset Status Cards in 4x2 Grid ---
-    // Screen: 320 x 240. Usable vertical space: y=34 to 220.
-    const int btn_w = 72;
-    const int btn_h = 90;
-    const int pad_x = 6;
-    const int pad_y = 6;
-    const int start_x = 6;
-    const int start_y = 34;
+static void home_gesture_cb(lv_event_t *event) {
+    if (lv_event_get_code(event) == LV_EVENT_GESTURE &&
+        lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_LEFT) {
+        lv_indev_wait_release(lv_indev_active());
+        lv_screen_load_anim(send_screen, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    }
+}
 
-    for (int i = 0; i < CYD_PRESETS_COUNT; i++) {
-        int col = i % 4;
-        int row = i / 4;
-        int x = start_x + col * (btn_w + pad_x);
-        int y = start_y + row * (btn_h + pad_y);
+static void send_gesture_cb(lv_event_t *event) {
+    if (lv_event_get_code(event) == LV_EVENT_GESTURE &&
+        lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+        lv_indev_wait_release(lv_indev_active());
+        lv_screen_load_anim(home_screen, LV_SCREEN_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
+    }
+}
 
+static int preset_category_index(const char *preset_id) {
+    if (strcmp(preset_id, "alles_gut") == 0 || strcmp(preset_id, "schlafen") == 0) return 0;
+    if (strcmp(preset_id, "hab_dich_lieb") == 0 || strcmp(preset_id, "feierabend") == 0) return 2;
+    if (strcmp(preset_id, "beschaeftigt") == 0 || strcmp(preset_id, "gleich_da") == 0) return 3;
+    return 1;
+}
+
+static void rebuild_preset_grid(void) {
+    if (!send_grid) return;
+    lv_obj_clean(send_grid);
+
+    int visible_index = 0;
+    const int button_w = 74;
+    const int button_h = 70;
+    for (int i = 0; i < CYD_PRESETS_COUNT; ++i) {
         const cyd_preset_t *preset = &CYD_PRESETS[i];
+        if (!enabled_categories[preset_category_index(preset->id)]) continue;
 
-        lv_obj_t *btn = lv_button_create(scr);
-        lv_obj_set_size(btn, btn_w, btn_h);
-        lv_obj_set_pos(btn, x, y);
-        set_dark_button_style(btn, 0x0B0F15, lv_color_to_u32(muted_accent(preset->color_hex)));
-        lv_obj_set_style_border_width(btn, 2, 0);
-        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_t *button = lv_button_create(send_grid);
+        lv_obj_set_size(button, button_w, button_h);
+        lv_obj_set_pos(button, (visible_index % 4) * 78, (visible_index / 4) * 74);
+        set_dark_button_style(button, 0x0B0F15, lv_color_to_u32(muted_accent(preset->color_hex)));
+        lv_obj_set_style_border_width(button, 2, 0);
+        lv_obj_set_style_radius(button, 8, 0);
+        lv_obj_add_event_cb(button, btn_preset_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
-        lv_obj_add_event_cb(btn, btn_preset_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *icon = lv_label_create(button);
+        lv_label_set_text(icon, preset->icon);
+        lv_obj_set_style_text_color(icon, muted_accent(preset->color_hex), 0);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 3);
 
-        // Icon Label
-        lv_obj_t *lbl_icon = lv_label_create(btn);
-        lv_label_set_text(lbl_icon, preset->icon);
-        lv_obj_set_style_text_color(lbl_icon, muted_accent(preset->color_hex), 0);
-        lv_obj_align(lbl_icon, LV_ALIGN_TOP_MID, 0, 4);
+        lv_obj_t *label = lv_label_create(button);
+        lv_label_set_text(label, preset->title);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(label, button_w - 6);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xD5DAE3), 0);
+        lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -2);
+        visible_index++;
+    }
+}
 
-        // Short Title Label
-        lv_obj_t *lbl_title = lv_label_create(btn);
-        lv_label_set_text(lbl_title, preset->title);
-        lv_label_set_long_mode(lbl_title, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(lbl_title, btn_w - 8);
-        lv_obj_set_style_text_align(lbl_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_style_text_color(lbl_title, lv_color_hex(0xC4CAD4), 0);
-        lv_obj_align(lbl_title, LV_ALIGN_BOTTOM_MID, 0, -3);
+static void category_button_cb(lv_event_t *event) {
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+    int category = (int)(intptr_t)lv_event_get_user_data(event);
+    if (category < 0 || category >= 4) return;
+
+    bool next = !enabled_categories[category];
+    int enabled_count = 0;
+    for (int i = 0; i < 4; ++i) enabled_count += enabled_categories[i] ? 1 : 0;
+    if (!next && enabled_count == 1) {
+        show_toast("Mindestens ein Set muss aktiv bleiben");
+        return;
+    }
+    enabled_categories[category] = next;
+    set_dark_button_style(category_buttons[category], next ? 0x1C2B38 : 0x10151E,
+                          next ? 0x607D8B : 0x334155);
+    rebuild_preset_grid();
+}
+
+static void switch_to_send_screen(lv_event_t *event) {
+    (void)event;
+    lv_screen_load_anim(send_screen, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+}
+
+static void switch_to_home_screen(lv_event_t *event) {
+    (void)event;
+    lv_screen_load_anim(home_screen, LV_SCREEN_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
+}
+
+static void refresh_home_messages(void) {
+    if (room_feed_count == 0) {
+        lv_label_set_text(home_sender, "Willkommen im Raum");
+        lv_label_set_text(home_message, "Noch keine Nachrichten.\nWische nach links zum Senden.");
+        lv_label_set_text(home_previous, "Neue Nachrichten aus dem Raum erscheinen hier.");
+        lv_label_set_text(home_emotion, "...");
+        lv_image_set_src(home_avatar, &cyd_avatar_cat);
+        return;
     }
 
-    // Toast feedback label (bottom bar)
-    lbl_toast = lv_label_create(scr);
-    lv_label_set_text(lbl_toast, "Tippe auf eine Karte zum Senden");
+    char message_text[160];
+    snprintf(message_text, sizeof(message_text), "%.*s",
+             (int)sizeof(message_text) - 1, room_feed[0].text);
+    lv_label_set_text(home_sender, room_feed[0].sender_name);
+    lv_label_set_text(home_message, message_text);
+    lv_image_set_src(home_avatar, cyd_avatar_get(room_feed[0].avatar_id));
+
+    const char *expression = "...";
+    if (strcmp(room_feed[0].emotion, "happy") == 0) expression = ":D";
+    if (strcmp(room_feed[0].emotion, "sleepy") == 0) expression = "Zzz";
+    else if (strcmp(room_feed[0].emotion, "hungry") == 0) expression = "...";
+    else if (strcmp(room_feed[0].emotion, "curious") == 0) expression = "?";
+    else if (strcmp(room_feed[0].emotion, "love") == 0) expression = "<3";
+    else if (strcmp(room_feed[0].emotion, "busy") == 0) expression = "!";
+    else if (strcmp(room_feed[0].emotion, "wave") == 0) expression = "-->";
+    lv_label_set_text(home_emotion, expression);
+
+    if (room_feed_count > 1) {
+        char previous_text[160];
+        snprintf(previous_text, sizeof(previous_text), "Zuletzt: %.31s: %.110s",
+                 room_feed[1].sender_name, room_feed[1].text);
+        lv_label_set_text(home_previous, previous_text);
+    } else {
+        lv_label_set_text(home_previous, "Dein Raum ist verbunden — tippe zum Antworten.");
+    }
+}
+
+static void add_room_message_locked(const cyd_room_message_t *message) {
+    if (!message || !message->text[0]) return;
+    size_t max = sizeof(room_feed) / sizeof(room_feed[0]);
+    if (room_feed_count < max) room_feed_count++;
+    for (size_t i = room_feed_count - 1; i > 0; --i) room_feed[i] = room_feed[i - 1];
+    room_feed[0] = *message;
+    refresh_home_messages();
+}
+
+static void on_room_message(const cyd_room_message_t *message, bool live_event) {
+    if (!cyd_lvgl_lock(250)) return;
+    add_room_message_locked(message);
+    bool remote = live_event && strcmp(message->sender_id, local_device_id) != 0;
+    cyd_lvgl_unlock();
+    if (remote) {
+        cyd_bsp_play_tone(988, 85);
+        cyd_bsp_rgb_set(false, true, true);
+        vTaskDelay(pdMS_TO_TICKS(120));
+        cyd_bsp_rgb_off();
+    }
+}
+
+static void on_room_server_status(bool connected) {
+    if (!cyd_lvgl_lock(100)) return;
+    const char *text = connected ? "Raum online" : "Server offline";
+    if (lbl_server_status) {
+        lv_label_set_text(lbl_server_status, text);
+        lv_obj_set_style_text_color(lbl_server_status,
+            lv_color_hex(connected ? 0x49A879 : 0xA05A5A), 0);
+    }
+    cyd_lvgl_unlock();
+}
+
+static void create_demo_ui(void) {
+    cyd_config_t cfg = {0};
+    cyd_config_load(&cfg);
+    snprintf(local_device_id, sizeof(local_device_id), "%s", cfg.device_id[0] ? cfg.device_id : "CYD_Display");
+
+    home_screen = lv_obj_create(NULL);
+    send_screen = lv_obj_create(NULL);
+    set_screen_background(home_screen);
+    set_screen_background(send_screen);
+    lv_obj_add_event_cb(home_screen, home_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(send_screen, send_gesture_cb, LV_EVENT_GESTURE, NULL);
+    add_header(home_screen, true);
+    add_header(send_screen, false);
+
+    lv_obj_t *room_label = lv_label_create(home_screen);
+    char room_text[48];
+    snprintf(room_text, sizeof(room_text), "Raum: %s", cfg.room_code[0] ? cfg.room_code : "DeskRoom-1");
+    lv_label_set_text(room_label, room_text);
+    lv_obj_set_style_text_color(room_label, lv_color_hex(0x8894A6), 0);
+    lv_obj_align(room_label, LV_ALIGN_TOP_LEFT, 8, 31);
+
+    lbl_server_status = lv_label_create(home_screen);
+    lv_label_set_text(lbl_server_status, "Server verbindet …");
+    lv_obj_set_style_text_color(lbl_server_status, lv_color_hex(0x596579), 0);
+    lv_obj_align(lbl_server_status, LV_ALIGN_TOP_RIGHT, -8, 31);
+
+    lv_obj_t *bubble = lv_obj_create(home_screen);
+    lv_obj_set_size(bubble, 211, 123);
+    lv_obj_set_pos(bubble, 8, 60);
+    lv_obj_set_style_bg_color(bubble, lv_color_hex(0x121A26), 0);
+    lv_obj_set_style_border_color(bubble, lv_color_hex(0x35445A), 0);
+    lv_obj_set_style_radius(bubble, 12, 0);
+    lv_obj_set_style_pad_all(bubble, 9, 0);
+
+    home_sender = lv_label_create(bubble);
+    lv_label_set_text(home_sender, "Willkommen im Raum");
+    lv_obj_set_style_text_color(home_sender, lv_color_hex(0xD7AD54), 0);
+    lv_obj_align(home_sender, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    home_message = lv_label_create(bubble);
+    lv_label_set_text(home_message, "Noch keine Nachrichten.\nWische nach links zum Senden.");
+    lv_label_set_long_mode(home_message, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(home_message, 190);
+    lv_obj_set_style_text_color(home_message, lv_color_hex(0xE1E5EC), 0);
+    lv_obj_align(home_message, LV_ALIGN_TOP_LEFT, 0, 28);
+
+    home_avatar = lv_image_create(home_screen);
+    lv_image_set_src(home_avatar, &cyd_avatar_cat);
+    lv_obj_set_pos(home_avatar, 231, 83);
+
+    home_emotion = lv_label_create(home_screen);
+    lv_label_set_text(home_emotion, "...");
+    lv_obj_set_style_text_color(home_emotion, lv_color_hex(0xD7AD54), 0);
+    lv_obj_set_style_text_align(home_emotion, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(home_emotion, 56);
+    lv_obj_align(home_emotion, LV_ALIGN_TOP_MID, 111, 142);
+
+    home_previous = lv_label_create(home_screen);
+    lv_label_set_text(home_previous, "Neue Nachrichten aus dem Raum erscheinen hier.");
+    lv_label_set_long_mode(home_previous, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(home_previous, 302);
+    lv_obj_set_style_text_color(home_previous, lv_color_hex(0x929CAF), 0);
+    lv_obj_align(home_previous, LV_ALIGN_TOP_LEFT, 9, 190);
+
+    lv_obj_t *home_send = lv_button_create(home_screen);
+    lv_obj_set_size(home_send, 92, 25);
+    lv_obj_align(home_send, LV_ALIGN_BOTTOM_RIGHT, -5, -3);
+    set_dark_button_style(home_send, 0x182433, 0x50677D);
+    lv_obj_add_event_cb(home_send, switch_to_send_screen, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *home_send_label = lv_label_create(home_send);
+    lv_label_set_text(home_send_label, "Senden  >");
+    lv_obj_center(home_send_label);
+
+    const char *category_names[] = {"Stimmung", "Alltag", "Nähe", "Pause"};
+    for (int i = 0; i < 4; ++i) {
+        lv_obj_t *button = lv_button_create(send_screen);
+        category_buttons[i] = button;
+        lv_obj_set_size(button, 74, 24);
+        lv_obj_set_pos(button, 6 + i * 78, 31);
+        set_dark_button_style(button, 0x1C2B38, 0x607D8B);
+        lv_obj_add_event_cb(button, category_button_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *label = lv_label_create(button);
+        lv_label_set_text(label, category_names[i]);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xD5DAE3), 0);
+        lv_obj_center(label);
+    }
+
+    send_grid = lv_obj_create(send_screen);
+    lv_obj_remove_style_all(send_grid);
+    lv_obj_set_size(send_grid, 312, 146);
+    lv_obj_set_pos(send_grid, 4, 58);
+    rebuild_preset_grid();
+
+    lv_obj_t *back = lv_button_create(send_screen);
+    lv_obj_set_size(back, 84, 23);
+    lv_obj_align(back, LV_ALIGN_BOTTOM_LEFT, 5, -3);
+    set_dark_button_style(back, 0x10151E, 0x334155);
+    lv_obj_add_event_cb(back, switch_to_home_screen, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *back_label = lv_label_create(back);
+    lv_label_set_text(back_label, "< Zuhause");
+    lv_obj_center(back_label);
+
+    lv_obj_t *set_hint = lv_label_create(send_screen);
+    lv_label_set_text(set_hint, "Sets antippen: ein / aus");
+    lv_obj_set_style_text_color(set_hint, lv_color_hex(0x778397), 0);
+    lv_obj_align(set_hint, LV_ALIGN_BOTTOM_MID, 0, -7);
+
+    lbl_toast = lv_label_create(home_screen);
+    lv_label_set_text(lbl_toast, "Swipe < zum Senden");
     lv_obj_set_style_text_color(lbl_toast, lv_color_hex(0x596579), 0);
-    lv_obj_align(lbl_toast, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_align(lbl_toast, LV_ALIGN_BOTTOM_LEFT, 8, -8);
+
+    lv_screen_load(home_screen);
 }
 
 // ==========================================
@@ -571,6 +877,7 @@ void app_main(void) {
 
     // 8. Init Wi-Fi & Auto-Connect / AP Fallback
     ESP_ERROR_CHECK(cyd_wifi_init(on_wifi_state_changed));
+    cyd_messages_init(on_room_message, on_room_server_status);
     cyd_wifi_connect_sta();
 
     ESP_LOGI(TAG, "CYD initialization completed.");

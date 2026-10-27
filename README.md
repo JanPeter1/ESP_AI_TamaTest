@@ -1,29 +1,32 @@
 # DeskConnect CYD
 
-Firmware für das ESP32-2432S028 („Cheap Yellow Display“) mit 2,8-Zoll-ILI9341-TFT und XPT2046-Touch. Das aktuelle ESP-IDF-Projekt bietet eine dunkle Querformat-Oberfläche mit Status-Buttons, lokaler LED-/Audio-Rückmeldung sowie einen WLAN-Konfigurationszugangspunkt. Der Python-Server ist ein separater Prototyp; die Firmware sendet derzeit noch keine Button-Ereignisse an andere Displays.
+DeskConnect CYD verbindet zwei ESP32-2432S028-Displays über einen gemeinsamen Raumserver. Die Firmware zeigt neue Nachrichten mit Pixel-Avatar und Emotionssymbol auf einem dunklen Tamagotchi-inspirierten Startbildschirm. Per Wischgeste wechselt man zur Sendeseite mit thematischen Kategorien und Nachrichtentasten.
 
 ## Projektstruktur
 
-- `firmware/main/`: Anwendung, CYD-Treiber, WLAN-Setup, Konfiguration und Status-Presets.
-- `firmware/components/esp_lcd_ili9341/`: ILI9341-Treiber samt eigener Initialisierungssequenz.
-- `firmware/HARDWARE_DISPLAY_TOUCH.md`: dokumentierte Display- und Touch-Einstellungen.
-- `server/`: eigenständiger FastAPI-Prototyp mit Browseroberfläche, HTTP-Endpunkten und WebSocket-Raumweiterleitung.
-- `README.md` und `PROJEKT_ZUSAMMENFASSUNG.md`: Einstieg und Funktionsübersicht.
+- `firmware/main/`: ESP-IDF-Anwendung, Display und Touch, WLAN-Setup, Raumkommunikation und eingebettete Avatare.
+- `firmware/main/assets/`: CC0-Quellbilder, Lizenzhinweise und Generator für LVGL-Grafiken.
+- `firmware/components/esp_lcd_ili9341/`: ILI9341-Treiber mit der für dieses Board verwendeten Initialisierung.
+- `firmware/HARDWARE_DISPLAY_TOUCH.md`: Pins, Displayorientierung, Touchkalibrierung und Initialisierung.
+- `server/app.py`: FastAPI-Raumserver und HTTP-/WebSocket-Schnittstellen.
+- `server/index.html`: Browseroberfläche zum Senden und Beobachten von Raumnachrichten.
+- `server/INTERFACE.md`: Nachrichtenformat, Endpunkte und Betriebsgrenzen.
+- `PROJEKT_ZUSAMMENFASSUNG.md`: Architektur, Funktionen und nächste Entwicklungsschritte.
 
 ## Firmware bauen und flashen
 
-Voraussetzung ist ESP-IDF 6.1 mit installiertem ESP32-Target. In einer ESP-IDF-PowerShell:
+Voraussetzung: ESP-IDF 6.1 mit ESP32-Target. In der ESP-IDF-PowerShell:
 
 ```powershell
 cd firmware
-idf.py set-target esp32  # nur beim ersten Einrichten des Build-Verzeichnisses
+idf.py set-target esp32  # einmalig pro Build-Verzeichnis
 idf.py build
-idf.py -p COM4 flash monitor  # COM4 durch den verwendeten Port ersetzen
+idf.py -p COM4 flash     # COM-Port des angeschlossenen Displays einsetzen
 ```
 
-Die Display- und Touch-Pins, Orientierung und Controller-Initialisierung sind in `firmware/HARDWARE_DISPLAY_TOUCH.md` beschrieben. Die Konfiguration wird im NVS gespeichert. Ohne gültige WLAN-Daten startet das Gerät einen `DeskConnect-XXXX`-Access-Point; danach die Setup-Seite unter `http://192.168.4.1` öffnen.
+Die Geräteeinstellungen liegen im NVS. Der Setup-Button öffnet einen WLAN-Access-Point; verbinde dich mit dem angezeigten `DeskConnect-XXXX`-Netz und rufe `http://192.168.4.1` auf. Trage WLAN, Server-Host (nur IP/Hostname), Port und denselben Raumcode auf allen Displays ein. Für den lokalen Server ist das meist Port `8000`. PC und Displays müssen sich gegenseitig im LAN erreichen können; Gast-WLANs blockieren diesen Zugriff häufig.
 
-## Python-Server starten
+## Server starten
 
 ```powershell
 cd server
@@ -31,8 +34,8 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Der Server lauscht standardmäßig auf Port 8000. Seine Nachrichten- und Foto-Endpunkte bedienen verbundene WebSocket-Clients im Arbeitsspeicher. Die Firmware enthält aktuell noch keinen passenden WebSocket-Client; ein gemeinsames Zwei-Display-System ist daher noch nicht fertig integriert.
+Der Server lauscht auf Port 8000 (oder dem Wert von `PORT`) an allen Netzwerkschnittstellen. Das Webinterface ist unter `http://<server-ip>:8000/` erreichbar. Nachrichten und Teilnehmerlisten liegen derzeit nur im Arbeitsspeicher; den Prototyp mit einem Uvicorn-Worker betreiben. Öffentlicher Betrieb benötigt Authentifizierung und dauerhafte Speicherung.
 
-## Entwicklung
+## Stil und Entwicklung
 
-C-Code folgt dem Stil der bestehenden ESP-IDF-Dateien (vier Leerzeichen, `snake_case`, Makros in Großbuchstaben). Python verwendet vier Leerzeichen und `snake_case`. Es gibt derzeit keine automatisierte Testsuite. Firmware-Änderungen mit `idf.py build` prüfen und hardwarebezogene Änderungen nach Möglichkeit am Board kontrollieren.
+C folgt dem bestehenden ESP-IDF-Stil: vier Leerzeichen, `snake_case` und Großbuchstaben für Makros. Python verwendet vier Leerzeichen und `snake_case`. Für Firmwareänderungen `idf.py build` ausführen; Hardwareverhalten anschließend am Display prüfen. Eine automatisierte Testsuite ist nicht eingerichtet.

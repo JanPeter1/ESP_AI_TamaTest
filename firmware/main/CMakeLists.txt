@@ -4,6 +4,8 @@ idf_component_register(
         "cyd_bsp.c"
         "cyd_config.c"
         "cyd_wifi.c"
+        "cyd_messages.c"
+        "cyd_avatars.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -12,6 +14,9 @@ idf_component_register(
         nvs_flash
         esp_netif
         esp_http_server
+        esp_websocket_client
+        cjson
+        mbedtls
         lwip
         esp_timer
         esp_lcd
